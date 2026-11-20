@@ -1,10 +1,8 @@
-// GatePass configuration. This is the only file you edit to host your own copy.
-// Supabase → Project Settings → API: copy the Project URL and the anon / public key.
-// The anon key is meant to be public; Row Level Security in schema.sql protects the data.
-// Never put the service_role key here.
+// Local preview config. Vercel builds replace dist/config.js with the values from Vercel's environment.
+// This publishable key is public by design; RLS protects the data. Never use a secret/service_role key here.
 window.GATEPASS = {
   supabaseUrl: "https://wzuifjwvpypynkfvqwyx.supabase.co",
-  supabaseAnonKey: "sb_publishable_QZzhST0dbcLqjB4EVeMnUA_PTr6ouE6",
+  supabasePublishableKey: "sb_publishable_QZzhST0dbcLqjB4EVeMnUA_PTr6ouE6",
 
   // Organiser sign-in methods.
   // emailSignIn: magic link by email (needs the Email provider on; for more than a few emails an hour, custom SMTP).

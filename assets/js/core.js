@@ -3,7 +3,7 @@ import qrcode from "../../vendor/qrcode.mjs";
 
 export const cfg = window.GATEPASS || {};
 export const ROOT = new URL("../../", import.meta.url);            // the site root, wherever it is hosted
-export const configured = !!(cfg.supabaseUrl && cfg.supabaseAnonKey && !/YOUR_|PLACEHOLDER/.test(cfg.supabaseUrl + cfg.supabaseAnonKey));
+export const configured = !!(cfg.supabaseUrl && cfg.supabasePublishableKey && !/YOUR_|PLACEHOLDER/.test(cfg.supabaseUrl + cfg.supabasePublishableKey));
 
 export const ART = [
   { key: "crowd", name: "Crowd" },
@@ -26,8 +26,8 @@ export async function rpc(fn, args = {}, { token, signal } = {}) {
     res = await fetch(`${cfg.supabaseUrl}/rest/v1/rpc/${fn}`, {
       method: "POST",
       headers: {
-        apikey: cfg.supabaseAnonKey,
-        Authorization: `Bearer ${token || cfg.supabaseAnonKey}`,
+        apikey: cfg.supabasePublishableKey,
+        Authorization: `Bearer ${token || cfg.supabasePublishableKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(args),

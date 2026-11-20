@@ -32,7 +32,7 @@ function notConfigured() {
 
 async function boot() {
   if (!configured || !window.supabase) return notConfigured();
-  sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey, {
+  sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabasePublishableKey, {
     auth: { flowType: "implicit", detectSessionInUrl: true, persistSession: true, autoRefreshToken: true },
   });
   const hashErr = new URLSearchParams((location.hash || "").replace(/^#/, "")).get("error_description");
@@ -131,8 +131,29 @@ function signInView(errMsg = "") {
     }
     checkInbox(email);
   });
-  view.querySelector("#google")?.addEventListener("click", () => {
-    sb.auth.signInWithOAuth({ provider: "google", options: { redirectTo: location.origin + location.pathname } });
+  view.querySelector("#google")?.addEventListener("click", async (event) => {
+    const googleButton = event.currentTarget;
+    const errorMessage = view.querySelector("#sErr");
+    googleButton.disabled = true;
+    if (errorMessage) errorMessage.hidden = true;
+    try {
+      const { data, error } = await sb.auth.signInWithOAuth({
+        provider: "google",
+        options: {
+          redirectTo: location.origin + location.pathname,
+          queryParams: { prompt: "select_account" },
+        },
+      });
+      if (error) throw error;
+      if (!data?.url) throw new Error("Google sign-in did not return a redirect URL.");
+    } catch (error) {
+      if (!googleButton.isConnected) return;
+      googleButton.disabled = false;
+      if (errorMessage) {
+        errorMessage.textContent = error?.message || String(error);
+        errorMessage.hidden = false;
+      }
+    }
   });
 }
 

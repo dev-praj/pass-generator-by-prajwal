@@ -34,7 +34,7 @@ Every pass has a 32-character random token (192 bits), so links can't be guessed
 - **Row Level Security** is on for every table. Organisers can only read and change their own events, passes and scans.
 - **Attendees** read their pass through `gp_pass(token)`, which returns that one pass (name, event, check-in time) and never the contact details or anyone else's pass.
 - **Gate staff** hold the event's gate code. Every staff action (`gp_gate_join`, `gp_scan`, `gp_gate_find`, `gp_gate_admit`, `gp_gate_stats`) is a `SECURITY DEFINER` function that checks the code first. The code has 31⁸ ≈ 850 billion combinations, and the organiser can replace it with one tap ("New code"); the old one stops working immediately. Staff search shows masked contacts only (`an•••@gmail.com`, `•••3210`).
-- Only the **anon key** is in `config.js`. It's designed to be public; never put the `service_role` key in this repo.
+- The browser uses only a Supabase **publishable key** (or legacy anon key), which is public by design and protected by Row Level Security. Never put a secret or `service_role` key in browser code or the Vercel frontend variables.
 
 ---
 
@@ -44,9 +44,8 @@ You need a free [Supabase](https://supabase.com) account and a static site host 
 
 1. **Create a Supabase project.** supabase.com → New project. Any region close to your college (Mumbai `ap-south-1` for most of India). Save the database password somewhere; GatePass never needs it.
 2. **Run the schema.** In the project, open **SQL Editor → New query**, paste the whole of [`schema.sql`](schema.sql), and press **Run**. It creates three tables, their security rules and the scan functions, all prefixed `gp_`. It's safe to run again, and safe in a project that already has other tables.
-3. **Put your keys in `config.js`.** Download or copy the project files, then edit [`config.js`](config.js): set `supabaseUrl` and `supabaseAnonKey` from **Project Settings → API** (Project URL, and the `anon` `public` key). Pick the organiser sign-in: `emailSignIn: true` for the email magic link (works out of the box on a new project), and `googleSignIn: true` only after you set up Google in **Authentication → Providers**. The hosted copy ships with Google only.
-4. **Publish the site.**
-   - **Netlify / Vercel:** publish the project folder. There is no build command; use the folder as the publish directory.
+3. **Add Supabase variables in Vercel.** In **Project → Settings → Environment Variables**, add `SUPABASE_URL` with your Project URL and `SUPABASE_PUBLISHABLE_KEY` with the publishable key from **Supabase → Project Settings → API Keys**. Add them to every Vercel environment you deploy (Production, Preview, and Development as needed). `vercel.json` builds the static site and writes these values into the deployed browser config. The publishable key is intended for browser use; never use a secret or `service_role` key here. The hosted copy ships with Google only.
+4. **Publish the site.** Connect the repository to Vercel and deploy. The included `vercel.json` runs the static build that copies the site to `dist` and injects the two Vercel environment variables into the deployed `config.js`.
 5. **Tell Supabase where the site lives.** **Authentication → URL Configuration**: set **Site URL** to your site's address and add it under **Redirect URLs** too. Without this, sign-in links bounce to `localhost`. **Authentication → Providers → Email** must be enabled (it is by default).
 
 Open your site, sign in, make an event, and do a test scan with two phones.
@@ -79,13 +78,15 @@ Event details, each attendee's name and the one contact column you choose (email
 index.html          organiser app (sign-in, events, passes, gate code, live counter)
 p/index.html        the attendee's pass, at p/#<token>
 gate/index.html     the gate scanner
-config.js           your Supabase URL + anon key (the only file you edit)
+config.js           local preview config; Vercel replaces it in the built site
+scripts/build-vercel.mjs  copies the static site and injects Vercel environment variables
+vercel.json         Vercel build command and output directory
 schema.sql          tables, RLS, scan functions (all gp_*)
 assets/             css, js modules, fonts, poster art, textures
 vendor/             supabase-js, jsQR, qrcode-generator (see vendor/LICENSES.md)
 ```
 
-Plain HTML, CSS and JavaScript modules. No build step and nothing to install. To run it locally: `python -m http.server 8000` in the repo folder, then open http://localhost:8000 (add `http://localhost:8000/**` to Supabase's Redirect URLs).
+Plain HTML, CSS and JavaScript modules. Vercel runs `node scripts/build-vercel.mjs` and serves `dist`; no packages need installing. To preview locally, run `python -m http.server 8000` from the repo folder and open `http://localhost:8000` (add `http://localhost:8000/**` to Supabase's Redirect URLs). The root `config.js` is only the local preview config; deployed builds use the values from Vercel.
 
 ## Licence
 
