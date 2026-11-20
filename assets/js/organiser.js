@@ -1,9 +1,10 @@
 // Organiser app: sign in, events, registrations → passes, links, gate code, live counter.
 import {
-  cfg, configured, ART, artUrl, passUrl, gateUrl, fmtCode, fmtWhen, fmtTime, fmtDay, esc, plural,
+  cfg, configured, ART, artUrl, passUrl, gateUrl, fmtCode, fmtWhen, fmtTime, fmtDay, fmtAgo, esc, plural,
   store, copyText, toast, download, qrSvg, I, paintIcons, PAUSED_MSG, escT, typo,
 } from "./core.js";
 import { parseTable, analyse, toPasses, toCsv, isEmail, isPhone } from "./csv.js";
+import { getSupabaseClient } from "./supabase-client.js";
 
 const view = document.getElementById("view");
 const roleEl = document.getElementById("role");
@@ -25,16 +26,14 @@ function notConfigured() {
         <li>Run <b>schema.sql</b> in its SQL editor.</li>
         <li>Put the project URL and anon key in <b>config.js</b>.</li>
       </ol>
-      <a class="btn" href="README.md#host-your-own-copy-free-5-steps">Read the 5-step guide ${I.open}</a>
+      <a class="btn" href="../README.md#host-your-own-copy-free-5-steps">Read the 5-step guide ${I.open}</a>
     </section>`;
   view.querySelector("#art").style.backgroundImage = `url("${artUrl(0)}")`;
 }
 
 async function boot() {
   if (!configured || !window.supabase) return notConfigured();
-  sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabasePublishableKey, {
-    auth: { flowType: "implicit", detectSessionInUrl: true, persistSession: true, autoRefreshToken: true },
-  });
+  sb = getSupabaseClient();
   const hashErr = new URLSearchParams((location.hash || "").replace(/^#/, "")).get("error_description");
   const { data } = await sb.auth.getSession();
   session = data.session;
@@ -81,8 +80,8 @@ function signInView(errMsg = "") {
     <section class="signin">
       <div class="poster hero-poster" id="art">
         <span class="hero-art-backdrop" aria-hidden="true">
-          <img class="hero-art-image hero-art-light" src="images/creator-light.png" alt="">
-          <img class="hero-art-image hero-art-dark" src="images/creator-dark.png" alt="">
+          <img class="hero-art-image hero-art-light" src="../images/creator-light.png" alt="">
+          <img class="hero-art-image hero-art-dark" src="../images/creator-dark.png" alt="">
         </span>
         <span class="hero-copy-scrim" aria-hidden="true"></span>
         <span class="hero-ticket-glint" aria-hidden="true"></span>
@@ -107,8 +106,8 @@ function signInView(errMsg = "") {
       ${cfg.googleSignIn ? `<div class="or">or</div>
       <button class="row" type="button" id="google" style="min-height:62px;justify-content:center">${I.google}<span>Continue with Google</span></button>` : ""}`}
       <div class="links" style="margin-top:8px">
-        <a href="gate/">${I.qr} Gate staff? Join with a code</a>
-        <a href="README.md#host-your-own-copy-free-5-steps">${I.open} Host your own copy</a>
+        <a href="../gate/">${I.qr} Gate staff? Join with a code</a>
+        <a href="../README.md#host-your-own-copy-free-5-steps">${I.open} Host your own copy</a>
       </div>
       </div>
     </section>`;
@@ -120,7 +119,7 @@ function signInView(errMsg = "") {
     if (!isEmail(email)) { err.textContent = "That email doesn't look right."; err.hidden = false; return; }
     store.set("gp.email", email);
     btn.disabled = true; btn.querySelector(".label").textContent = "Sending…";
-    const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: location.origin + location.pathname, shouldCreateUser: true } });
+    const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: new URL("./", location.href).href, shouldCreateUser: true } });
     btn.disabled = false; btn.querySelector(".label").textContent = "Send me a sign-in link";
     if (error) {
       err.textContent = /rate|too many|seconds/i.test(error.message)
@@ -140,7 +139,7 @@ function signInView(errMsg = "") {
       const { data, error } = await sb.auth.signInWithOAuth({
         provider: "google",
         options: {
-          redirectTo: location.origin + location.pathname,
+          redirectTo: new URL("./", location.href).href,
           queryParams: { prompt: "select_account" },
         },
       });
@@ -279,21 +278,25 @@ async function fetchAll(table, cols, eventId, extra = (q) => q) {
 }
 
 async function eventView(id) {
-  view.innerHTML = `<div class="skeleton" style="height:520px"></div>`;
-  let ev, passes, scans;
+  view.innerHTML = `<div class="dash-skeleton" aria-hidden="true"><div class="skeleton dash-skeleton-poster"></div><div class="dash-skeleton-right"><div class="skeleton dash-skeleton-card"></div><div class="skeleton dash-skeleton-card"></div></div></div>`;
+  let ev, passes, scans, registrations;
   try {
     const r = await sb.from("gp_events").select("*").eq("id", id).maybeSingle();
     if (r.error) throw r.error;
     if (!r.data) { toast("That event isn't yours or was deleted", "x"); location.hash = ""; return; }
     ev = r.data;
-    [passes, scans] = await Promise.all([
+    [passes, scans, registrations] = await Promise.all([
       fetchAll("gp_passes", "id,name,contact,token,created_at", id),
       fetchAll("gp_scans", "id,pass_id,is_first,gate,scanned_at", id),
+      fetchAll("gp_registrations", "id,event_id,user_id,name,phone,email,reg_no,semester,branch,pass_id,created_at", id),
     ]);
   } catch (e) { return fail(e); }
 
   passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
-  const state = { ev, passes, first: new Map(), bounced: 0, upload: null, filter: "", shown: 120 };
+  const state = {
+    ev, passes, registrations, first: new Map(), bounced: 0, upload: null, filter: "", shown: 120,
+    regSearch: "", regBranch: "", regSemester: "", regSelected: new Set(), regPage: 1,
+  };
   for (const s of scans) s.is_first ? state.first.set(s.pass_id, s) : state.bounced++;
 
   document.title = `${typo(ev.name)} · GatePass`;
@@ -311,21 +314,29 @@ async function eventView(id) {
         <div class="gatebox" id="gatebox"></div>
       </div>
       <div class="right stack">
-        <div class="head-row section-gap-m"><h2 class="head">Passes</h2><span class="fine" id="pcount"></span></div>
-        <div id="passTools" class="stack"></div>
-        <ul class="passlist" id="plist"></ul>
-        <div class="more-row" id="more"></div>
+        <section class="registration-admin stack" aria-labelledby="registrationAdminHeading">
+          <div class="head-row"><h2 class="head" id="registrationAdminHeading">Registrations</h2><span class="fine" id="registrationCount"></span></div>
+          <div id="registrationsSlot"></div>
+        </section>
+        <section class="pass-admin stack" aria-labelledby="passesHeading">
+          <div class="head-row"><h2 class="head" id="passesHeading">Passes</h2><span class="fine" id="pcount"></span></div>
+          <div id="passTools" class="stack"></div>
+          <ul class="passlist" id="plist"></ul>
+          <div class="more-row" id="more"></div>
+        </section>
         <div class="danger-zone">
           <a class="btn small" href="#/e/${id}/edit">Edit details</a>
           <button class="btn small danger" type="button" id="del">${I.trash}Delete event</button>
         </div>
       </div>
-    </div>`;
+    </div>
+    <dialog class="registration-confirm" id="registrationConfirm" aria-labelledby="registrationConfirmTitle" aria-describedby="registrationConfirmDescription"></dialog>`;
   view.querySelector("#poster").style.backgroundImage = `url("${artUrl(ev.art)}")`;
 
   renderReg(state);
   renderStat(state);
   renderGate(state);
+  renderRegistrations(state);
   renderPassTools(state);
   renderList(state);
 
@@ -455,6 +466,200 @@ async function generate(state) {
   renderReg(state); renderStat(state); renderPassTools(state); renderList(state);
 }
 
+// ── attendee registrations (separate from imported pass rows) ──
+function registrationCheckedIn(state, registration) {
+  return registration.pass_id ? state.first.get(registration.pass_id) || null : null;
+}
+
+function registrationRow(state, registration, mobile = false) {
+  const scan = registrationCheckedIn(state, registration);
+  const checkbox = `<input type="checkbox" data-reg-select="${esc(registration.id)}" aria-label="Select ${esc(registration.name)}">`;
+  const remove = `<button class="btn small danger registration-delete" type="button" data-reg-delete="${esc(registration.id)}" aria-label="Delete registration for ${esc(registration.name)}" title="Delete registration">${I.trash}<span class="sr">Delete</span></button>`;
+  const registered = fmtAgo(registration.created_at);
+  const registeredFull = fmtWhen(registration.created_at);
+  if (mobile) return `
+    <article class="registration-card">
+      <div class="registration-card-top">${checkbox}<strong title="${esc(registration.name)}">${esc(registration.name)}</strong>${scan ? `<span class="registration-checked">Checked in</span>` : ""}${remove}</div>
+      <dl>
+        <div><dt>Phone</dt><dd>${esc(registration.phone)}</dd></div>
+        <div><dt>Email</dt><dd>${esc(registration.email || "—")}</dd></div>
+        <div><dt>SAN/USN</dt><dd>${esc(registration.reg_no)}</dd></div>
+        <div><dt>Semester · Branch</dt><dd>${esc(registration.semester)} · ${esc(registration.branch)}</dd></div>
+        <div><dt>Registered</dt><dd title="${esc(registeredFull)}">${esc(registered)}</dd></div>
+        ${scan ? `<div><dt>Checked in at</dt><dd>${esc(fmtTime(scan.scanned_at))}</dd></div>` : `<div><dt>Status</dt><dd><span class="registration-not-checked">Not checked in</span></dd></div>`}
+      </dl>
+    </article>`;
+  return `<tr>
+    <td>${checkbox}</td><td><div class="registration-attendee"><strong title="${esc(registration.name)}">${esc(registration.name)}</strong><small title="${esc(registration.email || "—")}">${esc(registration.email || "—")}</small></div></td>
+    <td title="${esc(registration.reg_no)}">${esc(registration.reg_no)}</td><td title="${esc(registration.phone)}">${esc(registration.phone)}</td>
+    <td title="${esc(`${registration.semester} · ${registration.branch}`)}">${esc(registration.semester)} · ${esc(registration.branch)}</td>
+    <td title="${esc(registeredFull)}">${esc(registered)}</td><td>${scan ? `<span class="registration-checked">Checked in</span>` : `<span class="registration-not-checked">Not checked in</span>`}</td><td>${remove}</td>
+  </tr>`;
+}
+
+function renderRegistrations(state) {
+  const slot = view.querySelector("#registrationsSlot");
+  if (!slot) return;
+  view.querySelector("#registrationCount").textContent = plural(state.registrations.length, "registration");
+  view.querySelector("#registrationCount").setAttribute("aria-live", "polite");
+  const branches = [...new Set(state.registrations.map((row) => row.branch))].sort();
+  const semesters = [...new Set(state.registrations.map((row) => Number(row.semester)))].sort((a, b) => a - b);
+  const query = state.regSearch.trim().toLowerCase();
+  const matches = state.registrations.filter((row) => {
+    const searchMatch = !query || [row.name, row.reg_no, row.phone].some((value) => String(value || "").toLowerCase().includes(query));
+    return searchMatch && (!state.regBranch || row.branch === state.regBranch) && (!state.regSemester || String(row.semester) === state.regSemester);
+  }).sort((a, b) => a.name.localeCompare(b.name));
+  const pageSize = 25;
+  const pageCount = Math.max(1, Math.ceil(matches.length / pageSize));
+  state.regPage = Math.min(Math.max(1, state.regPage), pageCount);
+  const visibleRows = matches.slice((state.regPage - 1) * pageSize, state.regPage * pageSize);
+  if (!state.registrations.length) {
+    slot.innerHTML = `<p class="sub registration-empty">No attendee registrations yet.</p>`;
+    return;
+  }
+  const selectedVisible = visibleRows.filter((row) => state.regSelected.has(row.id));
+  const selectedRows = state.registrations.filter((row) => state.regSelected.has(row.id));
+  const noMatches = `<div class="registration-no-matches"><p class="sub">No registrations match these filters.</p><button class="btn small registration-clear-filters" type="button" data-clear-reg-filters>Clear filters</button></div>`;
+  slot.innerHTML = `
+    <div class="registration-tools">
+      <label class="search registration-search"><span>${I.search}</span><input class="input" id="regSearch" type="search" aria-label="Search registrations by name, SAN/USN or phone" placeholder="Search name, SAN/USN or phone" value="${esc(state.regSearch)}"></label>
+      <div class="registration-filters">
+        <label class="field"><span>Branch</span><select class="select" id="regBranchFilter"><option value="">All branches</option>${branches.map((branch) => `<option value="${esc(branch)}" ${state.regBranch === branch ? "selected" : ""}>${esc(branch)}</option>`).join("")}</select></label>
+        <label class="field"><span>Semester</span><select class="select" id="regSemesterFilter"><option value="">All semesters</option>${semesters.map((semester) => `<option value="${semester}" ${state.regSemester === String(semester) ? "selected" : ""}>${semester}</option>`).join("")}</select></label>
+      </div>
+      <div class="registration-actions">
+        <button class="btn small" type="button" id="exportRegistrations" aria-label="Export registrations as CSV">Export CSV</button>
+      </div>
+    </div>
+    <div class="registration-table-wrap">
+      <table class="registration-table">
+        <thead><tr><th><input type="checkbox" id="selectVisible" aria-label="Select visible registrations" ${visibleRows.length && visibleRows.every((row) => state.regSelected.has(row.id)) ? "checked" : ""}></th><th>Attendee</th><th>SAN/USN</th><th>Phone</th><th>Sem · Branch</th><th>Registered</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>${visibleRows.map((row) => registrationRow(state, row)).join("") || `<tr><td colspan="8">${noMatches}</td></tr>`}</tbody>
+      </table>
+    </div>
+    <div class="registration-cards">${visibleRows.map((row) => registrationRow(state, row, true)).join("") || noMatches}</div>
+    <div class="registration-pagination"><span>Showing ${matches.length ? (state.regPage - 1) * pageSize + 1 : 0}–${Math.min(state.regPage * pageSize, matches.length)} of ${matches.length}</span><div class="registration-pages"><button class="btn small" type="button" id="previousRegistrationPage" ${state.regPage <= 1 ? "disabled" : ""}>Previous</button><button class="btn small registration-more" type="button" id="showMoreRegistrations" ${state.regPage >= pageCount ? "disabled" : ""}>Next</button></div></div>
+    <div class="registration-bulk" id="registrationBulk" ${selectedRows.length ? "" : "hidden"}><span class="registration-bulk-count">${selectedRows.length} selected</span><button class="btn small danger" type="button" id="deleteSelected">Delete selected</button><button class="btn small" type="button" id="clearRegSelection">Clear</button></div>`;
+
+  const search = slot.querySelector("#regSearch");
+  search.addEventListener("input", () => {
+    const position = search.selectionStart;
+    state.regSearch = search.value;
+    state.regPage = 1;
+    renderRegistrations(state);
+    const replacement = slot.querySelector("#regSearch");
+    replacement.focus();
+    replacement.setSelectionRange(position, position);
+  });
+  slot.querySelector("#regBranchFilter").addEventListener("change", (event) => { state.regBranch = event.target.value; state.regPage = 1; renderRegistrations(state); });
+  slot.querySelector("#regSemesterFilter").addEventListener("change", (event) => { state.regSemester = event.target.value; state.regPage = 1; renderRegistrations(state); });
+  slot.querySelector("#selectVisible").addEventListener("change", (event) => {
+    for (const row of visibleRows) event.target.checked ? state.regSelected.add(row.id) : state.regSelected.delete(row.id);
+    renderRegistrations(state);
+  });
+  const visibleSelectedCount = selectedVisible.length;
+  const selectAll = slot.querySelector("#selectVisible");
+  selectAll.indeterminate = visibleSelectedCount > 0 && visibleSelectedCount < visibleRows.length;
+  slot.querySelectorAll("[data-reg-select]").forEach((checkbox) => checkbox.addEventListener("change", () => {
+    checkbox.checked ? state.regSelected.add(checkbox.dataset.regSelect) : state.regSelected.delete(checkbox.dataset.regSelect);
+    renderRegistrations(state);
+  }));
+  slot.querySelectorAll("[data-reg-delete]").forEach((button) => button.addEventListener("click", () => deleteRegistration(state, button.dataset.regDelete, button)));
+  slot.querySelector("#deleteSelected")?.addEventListener("click", () => deleteSelectedRegistrations(state, selectedRows));
+  slot.querySelector("#clearRegSelection")?.addEventListener("click", () => { state.regSelected.clear(); renderRegistrations(state); });
+  slot.querySelectorAll("[data-clear-reg-filters]").forEach((button) => button.addEventListener("click", () => { state.regSearch = ""; state.regBranch = ""; state.regSemester = ""; state.regPage = 1; renderRegistrations(state); }));
+  slot.querySelector("#previousRegistrationPage").addEventListener("click", () => { state.regPage--; renderRegistrations(state); });
+  slot.querySelector("#showMoreRegistrations").addEventListener("click", () => { state.regPage++; renderRegistrations(state); });
+  slot.querySelector("#exportRegistrations").addEventListener("click", () => {
+    const fields = ["id", "event_id", "user_id", "name", "phone", "email", "reg_no", "semester", "branch", "pass_id", "created_at", "pass_token", "checked_in_at", "gate"];
+    const rows = [fields, ...state.registrations.map((row) => {
+      const scan = registrationCheckedIn(state, row);
+      const pass = state.passes.find((item) => item.id === row.pass_id);
+      return [row.id, row.event_id, row.user_id, row.name, row.phone, row.email || "", row.reg_no, row.semester, row.branch, row.pass_id || "", row.created_at, pass?.token || "", scan?.scanned_at || "", scan?.gate || ""];
+    })];
+    const slug = state.ev.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "event";
+    download(`${slug}-registrations.csv`, toCsv(rows));
+  });
+}
+
+async function deleteRegistration(state, id, button) {
+  const registration = state.registrations.find((row) => row.id === id);
+  if (!registration) return;
+  if (!await confirmRegistrationDelete(state, [registration])) return;
+  button.disabled = true;
+  const { error } = await sb.rpc("gp_delete_registration", { p_registration_id: id });
+  if (error) { button.disabled = false; return toast(error.message || "Couldn't delete the registration", "x"); }
+  state.regSelected.delete(id);
+  try { await refreshEventData(state); } catch { toast("Registration deleted; refresh the event to update its lists.", "x"); return; }
+  toast("Registration deleted");
+}
+
+async function deleteSelectedRegistrations(state, selected) {
+  const ids = selected.map((row) => row.id);
+  if (!ids.length) return;
+  if (!await confirmRegistrationDelete(state, selected)) return;
+  const bulkButton = view.querySelector("#deleteSelected");
+  if (bulkButton) bulkButton.disabled = true;
+  for (const id of ids) {
+    const { error } = await sb.rpc("gp_delete_registration", { p_registration_id: id });
+    if (error) {
+      try { await refreshEventData(state); } catch {}
+      return toast(error.message || "Couldn't delete all selected registrations", "x");
+    }
+    state.regSelected.delete(id);
+  }
+  await refreshEventData(state);
+  toast(`${plural(ids.length, "registration")} deleted`);
+}
+
+function confirmRegistrationDelete(state, registrations) {
+  const dialog = view.querySelector("#registrationConfirm");
+  if (!dialog) return Promise.resolve(false);
+  const checked = registrations.filter((row) => registrationCheckedIn(state, row)).length;
+  const names = registrations.slice(0, 3).map((row) => `<li>${esc(row.name)}</li>`).join("");
+  const remaining = registrations.length > 3 ? `<li>and ${registrations.length - 3} more</li>` : "";
+  dialog.innerHTML = `<div class="registration-confirm-inner"><h2 id="registrationConfirmTitle">Delete ${registrations.length === 1 ? "this registration" : `${registrations.length} registrations`}?</h2><p id="registrationConfirmDescription">${checked ? `${checked} attendee${checked === 1 ? " is" : "s are"} already checked in. Their passes and scan history will be removed.` : "Their passes will stop working."}</p><ul>${names}${remaining}</ul><div class="registration-confirm-actions"><button class="btn small" type="button" data-confirm-cancel>Cancel</button><button class="btn small danger" type="button" data-confirm-delete>${registrations.length === 1 ? "Delete registration" : "Delete registrations"}</button></div></div>`;
+  const opener = document.activeElement;
+  return new Promise((resolve) => {
+    let settled = false;
+    const onCancel = (event) => { event.preventDefault(); finish(false); };
+    const finish = (approved) => {
+      if (settled) return;
+      settled = true;
+      dialog.removeEventListener("close", onClose);
+      dialog.removeEventListener("cancel", onCancel);
+      dialog.close();
+      if (opener?.isConnected) opener.focus();
+      resolve(approved);
+    };
+    const onClose = () => finish(false);
+    dialog.addEventListener("close", onClose, { once: true });
+    dialog.querySelector("[data-confirm-cancel]").addEventListener("click", () => finish(false));
+    dialog.querySelector("[data-confirm-delete]").addEventListener("click", () => finish(true));
+    dialog.addEventListener("cancel", onCancel);
+    dialog.showModal();
+    dialog.querySelector("[data-confirm-cancel]").focus();
+  });
+}
+
+async function refreshEventData(state) {
+  const [passes, scans, registrations] = await Promise.all([
+    fetchAll("gp_passes", "id,name,contact,token,created_at", state.ev.id),
+    fetchAll("gp_scans", "id,pass_id,is_first,gate,scanned_at", state.ev.id),
+    fetchAll("gp_registrations", "id,event_id,user_id,name,phone,email,reg_no,semester,branch,pass_id,created_at", state.ev.id),
+  ]);
+  state.passes = passes.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.name.localeCompare(b.name));
+  state.registrations = registrations;
+  state.regSelected = new Set([...state.regSelected].filter((id) => registrations.some((row) => row.id === id)));
+  state.first = new Map(); state.bounced = 0;
+  for (const scan of scans) scan.is_first ? state.first.set(scan.pass_id, scan) : state.bounced++;
+  if (!view.querySelector("#registrationsSlot")) return;
+  renderStat(state, true);
+  renderPassTools(state);
+  renderList(state);
+  renderRegistrations(state);
+}
+
 // ── checked-in counter ──
 function renderStat(state, bump = false) {
   const total = state.passes.length, checked = state.first.size;
@@ -524,7 +729,7 @@ function renderPassTools(state) {
   el.innerHTML = `
     <div class="tools">
       <button class="btn small" type="button" id="cpAll">${I.copy}Copy all links</button>
-      <button class="btn small" type="button" id="csv">${I.download}Export CSV</button>
+      <button class="btn small" type="button" id="csv" aria-label="Export passes as CSV">${I.download}Export CSV</button>
     </div>
     <p class="fine" style="margin:0">GatePass sends nothing. Send each link yourself on WhatsApp or email; every link opens that person's pass.</p>
     <div class="search"><span>${I.search}</span><input class="input" id="filter" placeholder="Search names" autocomplete="off" value="${esc(state.filter)}"></div>`;
@@ -588,19 +793,16 @@ function startLive(state) {
     } else state.bounced++;
     renderStat(state, true);
   };
-  live = sb.channel(`gp-scans-${id}`)
+  live = sb.channel(`gp-event-${id}`)
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "gp_scans", filter: `event_id=eq.${id}` }, (msg) => apply(msg.new))
+    .on("postgres_changes", { event: "INSERT", schema: "public", table: "gp_registrations", filter: `event_id=eq.${id}` }, () => refreshEventData(state).catch(() => {}))
+    // DELETE filters rely on full replica identity; refreshing on any visible deletion is safe.
+    .on("postgres_changes", { event: "DELETE", schema: "public", table: "gp_registrations" }, () => refreshEventData(state).catch(() => {}))
     .subscribe();
   // Belt and braces: re-sync every 20 s in case the socket sleeps (phones do that).
   pollTimer = setInterval(async () => {
     if (document.visibilityState !== "visible") return;
-    try {
-      const scans = await fetchAll("gp_scans", "id,pass_id,is_first,gate,scanned_at", id);
-      const before = state.first.size + state.bounced;
-      state.first = new Map(); state.bounced = 0;
-      for (const s of scans) s.is_first ? state.first.set(s.pass_id, s) : state.bounced++;
-      if (state.first.size + state.bounced !== before) { renderStat(state, true); renderList(state); }
-    } catch {}
+    try { await refreshEventData(state); } catch {}
   }, 20000);
 }
 function stopLive() {

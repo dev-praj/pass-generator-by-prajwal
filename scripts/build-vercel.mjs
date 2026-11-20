@@ -17,7 +17,7 @@ if (!publishableKey.startsWith("sb_publishable_") && !publishableKey.startsWith(
 }
 
 await mkdir(output, { recursive: true });
-for (const directory of ["assets", "gate", "p", "vendor", "images"]) {
+for (const directory of ["assets", "gate", "host", "p", "vendor", "images"]) {
   await cp(join(root, directory), join(output, directory), { recursive: true, force: true });
 }
 for (const file of ["index.html", "README.md", "schema.sql", ".nojekyll"]) {
