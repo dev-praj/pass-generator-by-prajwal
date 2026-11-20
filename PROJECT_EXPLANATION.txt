@@ -1,0 +1,234 @@
+GATEPASS PROJECT EXPLANATION
+===========================
+
+This document explains what GatePass does, how its pages work, how its backend
+is structured, and how the deployed website connects to Supabase.
+
+
+1. WHAT THE PROJECT DOES
+------------------------
+
+GatePass is a QR entry-pass system for college and club events. It has three
+main parts:
+
+1. Organiser page: Organisers sign in, create events, import attendee names
+   and contact details, generate passes, and monitor check-ins.
+2. Attendee pass page: Each attendee opens a unique link and shows the QR
+   ticket. Attendees do not need an account.
+3. Gate scanner: Staff enter an event's gate code, then scan tickets, search
+   for attendees by name, or scan a saved ticket image. Staff do not need
+   accounts.
+
+The main source files are:
+  index.html              Organiser page
+  p/index.html            Attendee pass page
+  gate/index.html         Gate scanner page
+  assets/js/organiser.js  Organiser sign-in, event and pass workflows
+  assets/js/pass.js       Attendee pass lookup and rendering
+  assets/js/gate.js       Gate joining, scanning, searching and results
+  schema.sql              Database tables, permissions and backend functions
+
+
+2. HOW THE PIECES CONNECT
+-------------------------
+
+Vercel serves the website's HTML, CSS, JavaScript, and images. The browser
+then talks directly to Supabase for sign-in and database operations. There
+is no separate custom application server in this repository: the database
+schema and SQL functions in schema.sql provide the backend rules.
+
+  Organiser browser -- Google sign-in/session --> Supabase Auth
+  Organiser browser -- events and attendee data --> Supabase Postgres
+  Attendee browser  -- pass token lookup --------> Supabase SQL functions
+  Gate browser      -- gate code and scans ------> Supabase SQL functions
+  SQL functions     -- read/write ----------------> Supabase Postgres
+  Vercel            -- serves the static website -> all three browsers
+
+The Supabase project URL is the same endpoint for the project's authentication
+and database APIs. The app does not need one URL for Auth and another for the
+database. SUPABASE_PUBLISHABLE_KEY is the browser-facing key used with that
+URL. It is intentionally public, so database access rules are what protect
+the data.
+
+
+3. ORGANISER WORKFLOW
+---------------------
+
+Sign-in
+  The hosted configuration enables Google sign-in. Supabase handles the OAuth
+  exchange and returns the user to the site. The browser keeps the session
+  using the Supabase client. The organiser page is the dashboard; there is no
+  separate administrator account type in the database schema. A signed-in
+  organiser can manage their own events.
+
+Create an event
+  The organiser enters the event name, club, date, time, venue, and poster
+  art. The app saves the event to the gp_events table.
+
+Import attendees
+  Organisers can upload a CSV, TSV or text file, or paste spreadsheet rows.
+  The parser tries to identify the name and contact columns. The organiser can
+  adjust the selected columns and preview the rows. Blank names and duplicate
+  name/contact pairs are skipped. Each import is limited to 5,000 rows, and
+  passes are inserted in batches.
+
+Generate passes
+  Each attendee becomes a row in gp_passes. Supabase generates a unique,
+  random token for each pass.
+
+Share passes
+  The dashboard offers individual links, bulk copy, and CSV export. Email and
+  WhatsApp buttons open the organiser's own app with a message prepared.
+  GatePass itself does not send emails or messages.
+
+Monitor entry
+  The organiser sees the checked-in count and repeat attempts. The dashboard
+  subscribes to Supabase Realtime and also refreshes scan data periodically in
+  case the live connection drops.
+
+Edit or delete
+  Event details can be changed, the gate code can be rotated, and an event can
+  be deleted. Deleting an event also deletes its passes and scans through the
+  database's cascade rules.
+
+
+4. ATTENDEE PASS
+----------------
+
+A pass URL contains a long random token after p/#. The pass page calls the
+gp_pass database function with that token. The function returns the matching
+attendee's name, event details, and first check-in details. It does not return
+the attendee's contact information or other attendees' records.
+
+The QR shown on the ticket contains the pass link. A screenshot works because
+the link remains readable, but the pass only gets accepted once. A screenshot
+does not create a new pass or bypass the check-in rule.
+
+
+5. GATE SCANNER
+---------------
+
+Staff enter the event's eight-character gate code, choose a gate name, and
+grant camera access. The scanner can also read a ticket from an image. If
+someone's phone is unavailable, staff can search by at least part of the
+person's name. Contact details shown in search results are masked.
+
+The scanner sends the gate code and pass token to a Supabase function:
+
+  Green (ok)       The pass had its first accepted scan.
+  Red (dup)        The pass was already accepted; the response includes when
+                   and at which gate it was first accepted.
+  Warning          The pass is invalid, belongs to another event, or the gate
+                   code is no longer valid.
+  No connection    The app could not check the database. It does not admit the
+                   person offline.
+
+Gate counts refresh by polling every five seconds. A phone also remembers its
+gate code and chosen gate locally so staff can reopen the scanner without
+re-entering them.
+
+
+6. BACKEND DATA AND RULES
+-------------------------
+
+The backend schema is in schema.sql. It defines three main tables:
+
+  gp_events
+    Event details, the organiser's Supabase user ID, poster choice, and gate
+    code.
+
+  gp_passes
+    Attendee name and contact, event reference, and unique pass token.
+
+  gp_scans
+    Each scan attempt, whether it was the accepted first scan, the gate name,
+    scan time, and a random browser device ID.
+
+The core anti-duplicate rule is enforced in Postgres, not just in the
+scanner's JavaScript. A unique partial index allows only one scan marked as
+the accepted first scan for each pass. The SQL function attempts to insert
+that first scan atomically. If two gate phones scan the same pass at nearly
+the same time, the database accepts one and reports the other as a repeat.
+
+Important database functions include:
+
+  gp_pass          Looks up one pass by its token.
+  gp_gate_join     Checks a gate code and returns event information.
+  gp_scan          Checks a token and records a scan attempt.
+  gp_gate_find     Searches attendees by name for gate staff.
+  gp_gate_admit    Admits a selected attendee from search results.
+  gp_gate_stats    Returns gate counts and recent scans.
+  gp_rotate_code   Lets the event owner issue a replacement gate code.
+
+
+7. ACCESS AND SECURITY
+----------------------
+
+Row Level Security (RLS) is enabled on all three tables. Signed-in organisers
+can access records only for events they own. Gate staff and attendees use
+narrowly scoped SQL functions instead of receiving broad table access.
+
+The gate code is a credential: anyone who has it can use gate functions for
+that event. Changing the code makes the old code stop working. Pass links are
+also credentials: someone who obtains a pass link can display that pass.
+
+The browser uses a Supabase publishable key, not a privileged server key.
+Never put a Supabase secret key or service_role key in frontend code or
+frontend environment variables. A browser user can inspect values delivered
+to the browser, so the publishable key must be paired with RLS and the
+restricted SQL functions.
+
+
+8. GOOGLE SIGN-IN AND LOCALHOST REDIRECTS
+-----------------------------------------
+
+The organiser page asks Supabase to sign in with Google and sets the return
+address to the same site origin where sign-in began. A sign-in started on the
+deployed domain should return to that deployed domain. A sign-in started on
+localhost returns to localhost. Supabase Auth URL Configuration must allow
+each address that will be used.
+
+The earlier screenshot showed the browser returning to localhost:3000, but
+nothing was listening there, so Chrome reported "connection refused." That is
+a local address/server availability issue after the OAuth redirect, rather
+than a second database URL. For local testing, the local server must be
+running at the exact port used to start sign-in.
+
+
+9. HOSTING AND LOCAL CONFIGURATION
+----------------------------------
+
+The Vercel build reads these environment variables:
+
+  SUPABASE_URL
+  SUPABASE_PUBLISHABLE_KEY
+
+The build script scripts/build-vercel.mjs writes them into the generated
+browser config.js. vercel.json tells Vercel to run that build and serve the
+dist directory. The root config.js is for local preview; deployed builds
+generate their own config from Vercel's variables.
+
+The README documents running a local static server and configuring Supabase's
+allowed redirect URLs for that local address. Supabase's Site URL should be
+the production website address, and the allowed Redirect URLs should include
+the production site and each local development address you use.
+
+
+10. WHAT IS STORED
+------------------
+
+The database stores event details, each attendee's name and the one contact
+column chosen during import (email or phone), and every scan attempt. Scan
+records include time, gate name, and a random device ID. Deleting an event
+deletes its related passes and scans. The attendee pass page displays only the
+attendee's name, event details, and whether the pass was used.
+
+
+11. LIMIT OF THIS SOURCE REVIEW
+-------------------------------
+
+This document describes what the project source is designed to do. It does
+not confirm the current state of the live Supabase dashboard. In particular,
+the source review cannot verify whether schema.sql has been run in the live
+project or whether Google's provider settings and redirect URLs are currently
+correct.
